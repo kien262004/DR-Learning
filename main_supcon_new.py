@@ -209,6 +209,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    c_losses = AverageMeter()
+    d_losses = AverageMeter()
 
     end = time.time()
     for idx, (images, labels) in enumerate(train_loader):
@@ -246,6 +248,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
 
         # update metric
         losses.update(loss.item(), bsz)
+        c_losses.update(context_loss.item(), bsz)
+        d_losses.update(degrad_loss.item(), bsz)
 
         # SGD
         optimizer.zero_grad()
@@ -261,9 +265,11 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'loss {loss.val:.3f} ({loss.avg:.3f})'.format(
+                  'loss {loss.val:.3f} ({loss.avg:.3f})\t'
+                  'context_loss {c_loss.val:.3f} ({c_loss.avg:.3f})\t'
+                  'degraded_loss {d_loss.val:.3f} ({d_loss.avg:.3f})\t'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses))
+                   data_time=data_time, loss=losses, c_loss=c_losses, d_loss=d_losses))
             sys.stdout.flush()
 
     return losses.avg
