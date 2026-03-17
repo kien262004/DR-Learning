@@ -243,7 +243,7 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         degrad_feat = torch.cat([degrad_feat1, degrad_feat2], dim=0)
         
         labels = labels.flatten()
-        
+        print(context_feat.shape, labels.shape)
         degrad_loss = criterion(context_feat, labels)
         context_loss = criterion(degrad_feat)
 
