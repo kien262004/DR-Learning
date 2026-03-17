@@ -6,7 +6,11 @@ import torch
 from .base_dataset import BaseDataset
 
 
-
+mapping = {
+    'blur' : 0,
+    'lol' : 1,
+    'sharp' : 2
+}
 class DouDataset(BaseDataset):
     
     def __init__(self, image_dir, transform=None):
@@ -16,7 +20,7 @@ class DouDataset(BaseDataset):
         idx, tasks = id_image
         selected = random.sample(tasks, 2)
         paths = [os.path.join(self.image_dir, idx, task) for task in selected]
-        selected = [os.path.split(file)[0] for file in selected]
+        selected = [mapping[os.path.split(file)[0]] for file in selected]
         return paths, selected
     
     def __getitem__(self, idx):
