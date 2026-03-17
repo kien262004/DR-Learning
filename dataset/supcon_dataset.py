@@ -1,7 +1,7 @@
 import os
 from PIL import Image
 import random
-
+import torch
 
 from base_dataset import BaseDataset
 
@@ -29,8 +29,7 @@ class DouDataset(BaseDataset):
         images_2 = [self.transform(image_2), self.transform(image_2)]
 
         images = images_1 + images_2
-        labels = [labels[0], labels[0], labels[1], labels[1]]
-        
+        labels = torch.tensor(labels)
         return images, labels
         
         
