@@ -244,8 +244,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         
         labels = labels.flatten()
         print(context_feat.shape, labels.shape)
-        degrad_loss = criterion(context_feat, labels)
-        context_loss = criterion(degrad_feat)
+        degrad_loss = criterion(degrad_feat, labels)
+        context_loss = criterion(context_feat)
 
         loss = degrad_loss + opt.context_lambda * context_loss
 
