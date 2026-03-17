@@ -15,7 +15,8 @@ class DouDataset(BaseDataset):
     def _get_path(self, id_image):
         idx, tasks = id_image
         selected = random.sample(tasks, 2)
-        paths = [os.path.join(self.image_dir, idx, task + '.jpg') for task in selected]
+        paths = [os.path.join(self.image_dir, idx, task) for task in selected]
+        selected = [os.path.split(file)[0] for file in selected]
         return paths, selected
     
     def __getitem__(self, idx):
