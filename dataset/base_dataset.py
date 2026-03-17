@@ -27,7 +27,7 @@ class BaseDataset(Dataset, ABC):
         image_files = {}
         
         for idx in os.listdir(self.image_dir):
-            image_files[idx] = os.listdir(os.path.join(self.image_dir, idx))                
+            image_files[idx] = [os.path.splitext(file)[0] for file in  os.listdir(os.path.join(self.image_dir, idx))]            
 
         image_files = list(image_files.items())
         return image_files
