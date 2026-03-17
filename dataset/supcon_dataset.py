@@ -3,7 +3,7 @@ from PIL import Image
 import random
 import torch
 
-from base_dataset import BaseDataset
+from .base_dataset import BaseDataset
 
 
 
