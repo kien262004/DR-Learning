@@ -16,7 +16,7 @@ from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model
 from networks.resnet_big import SupConResNet
 from dataset.supcon_dataset import DouDataset
-from losses import SupConLoss
+from losses import SupConLoss, SeperateLoss
 
 
 try:
@@ -40,6 +40,8 @@ def parse_option():
     parser.add_argument('--epochs', type=int, default=1000,
                         help='number of training epochs')
     parser.add_argument('--context_lambda', type=float, default=0.5,
+                        help='weight of context loss')
+    parser.add_argument('--sep_lambda', type=float, default=1,
                         help='weight of context loss')
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.05,
@@ -189,7 +191,7 @@ def set_loader(opt):
 
 def set_model(opt):
     model = SupConResNet(name=opt.model)
-    criterion = SupConLoss(temperature=opt.temp)
+    criterion = [SupConLoss(temperature=opt.temp), SeperateLoss()]
 
     # enable synchronized Batch Normalization
     if opt.syncBN:
@@ -199,7 +201,7 @@ def set_model(opt):
         if torch.cuda.device_count() > 1:
             model.encoder = torch.nn.DataParallel(model.encoder)
         model = model.cuda()
-        criterion = criterion.cuda()
+        criterion = [criter.cuda() for criter in criterion]
         cudnn.benchmark = True
 
     return model, criterion
@@ -214,6 +216,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
     losses = AverageMeter()
     c_losses = AverageMeter()
     d_losses = AverageMeter()
+    s_losses = AverageMeter()
+
 
     end = time.time()
     for idx, (images, labels) in enumerate(train_loader):
@@ -229,30 +233,33 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
         # compute loss
-        features = model(images)
-        f1, f2, f3, f4 = torch.split(features, [bsz, bsz, bsz, bsz], dim=0)
+        context_feat, degrad_feat = model(images)
+        c_f1, c_f2, c_f3, c_f4 = torch.split(context_feat, [bsz, bsz, bsz, bsz], dim=0)
+        d_f1, d_f2, d_f3, d_f4 = torch.split(degrad_feat, [bsz, bsz, bsz, bsz], dim=0)
         
-        features1 = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        features2 = torch.cat([f3.unsqueeze(1), f4.unsqueeze(1)], dim=1)
-        
-        size_feat = features1.shape[2] // 2
-        context_feat1, degrad_feat1 = torch.split(features1, [size_feat, size_feat], dim=2)
-        context_feat2, degrad_feat2 = torch.split(features2, [size_feat, size_feat], dim=2)
+        context_feat1 = torch.cat([c_f1.unsqueeze(1), c_f2.unsqueeze(1)], dim=1)
+        context_feat2 = torch.cat([c_f3.unsqueeze(1), c_f4.unsqueeze(1)], dim=1)
 
         context_feat = torch.cat([context_feat1, context_feat2], dim=1)
+        context_feat_01 = torch.cat([context_feat1, context_feat2], dim=0)
+
+        degrad_feat1 = torch.cat([d_f1.unsqueeze(1), d_f2.unsqueeze(1)], dim=1)
+        degrad_feat2 = torch.cat([d_f3.unsqueeze(1), d_f4.unsqueeze(1)], dim=1)        
         degrad_feat = torch.cat([degrad_feat1, degrad_feat2], dim=0)
+
         
         labels = labels.flatten()
-        degrad_loss = criterion(degrad_feat, labels)
-        context_loss = criterion(context_feat)
+        degrad_loss = criterion[0](degrad_feat, labels)
+        context_loss = criterion[0](context_feat)
+        seperate_loss = criterion[1](context_feat_01, degrad_feat)
 
-        loss = degrad_loss + opt.context_lambda * context_loss
+        loss = degrad_loss + opt.context_lambda * context_loss + opt.sep_lambda * seperate_loss
 
         # update metric
         losses.update(loss.item(), bsz)
         c_losses.update(context_loss.item(), bsz)
         d_losses.update(degrad_loss.item(), bsz)
-
+        s_losses.update(seperate_loss.item(), bsz)
         # SGD
         optimizer.zero_grad()
         loss.backward()
@@ -269,9 +276,10 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
                   'context_loss {c_loss.val:.3f} ({c_loss.avg:.3f})\t'
-                  'degraded_loss {d_loss.val:.3f} ({d_loss.avg:.3f})\t'.format(
+                  'degraded_loss {d_loss.val:.3f} ({d_loss.avg:.3f})\t'
+                  'sep_loss {s_loss.val:.3f} ({s_loss.avg:.3f})\t'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, c_loss=c_losses, d_loss=d_losses))
+                   data_time=data_time, loss=losses, c_loss=c_losses, d_loss=d_losses, s_loss=s_losses))
             sys.stdout.flush()
 
     return losses.avg
