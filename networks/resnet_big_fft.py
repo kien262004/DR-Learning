@@ -7,26 +7,71 @@ Adapted from: https://github.com/bearpaw/pytorch-classification
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_wavelets import DWTForward, DWTInverse
 
+import torch
+import torch.nn as nn
 
-class LayerNorm2d(nn.Module):
-    def __init__(self, channels, eps=1e-6):
-        super().__init__()
-        self.register_parameter('weight', nn.Parameter(torch.ones(channels)))
-        self.register_parameter('bias', nn.Parameter(torch.zeros(channels)))
-        self.eps = eps
+class FrequencyFeatureExtractor(nn.Module):
+    def __init__(self, in_channels, is_last_layer=False):
+        super(FrequencyFeatureExtractor, self).__init__()
+        self.is_last_layer = is_last_layer
+        
+        # Bộ lọc Conv 3x3 để "ngửi" hình dạng FFT (vạch, tia, vòng tròn)
+        # Giữ nguyên số channel để xử lý song song từng kênh tần số
+        self.freq_conv = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True)
+        )
 
-    def forward(self, x):
-        # x: (B, C, H, W)
-        # Tính mean và var trên chiều Channel
-        mean = x.mean(1, keepdim=True)
-        var = (x - mean).pow(2).mean(1, keepdim=True)
-        x = (x - mean) / torch.sqrt(var + self.eps)
-        # Áp dụng weight và bias (reshape để broadcast đúng channel)
-        x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
-        return x
+        if not self.is_last_layer:
+            # Nhánh điều biến (Modulation) cho các tầng giữa
+            # Downsample không gian xuống 1 nửa để nén thông tin
+            self.downsample = nn.Conv2d(in_channels, 2*in_channels, kernel_size=3, stride=2, padding=1)
 
+            self.gate = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(in_channels, in_channels),
+                nn.Sigmoid()
+            )
+        else:
+            # Nhánh tạo Embedding cho tầng cuối
+            self.global_pool = nn.AdaptiveAvgPool2d(1)
+            self.flatten = nn.Flatten()
+            # Kết quả trả về sẽ là vector embedding [B, in_channels]
+
+    def forward(self, x, mag_down=None):
+        B, C, H, W = x.shape
+        
+        # 1. Chuyển sang miền tần số
+        # rfft2 cho kết quả [B, C, H, W//2 + 1]
+        ffted = torch.fft.rfft2(x, norm='ortho')
+        mag = torch.abs(ffted) 
+        
+        # 2. Học hình dáng từ Magnitude qua Conv 3x3
+        # FFT Magnitude có thể coi như một "ảnh" đặc trưng tần số
+        if mag_down is not None:
+            mag_features = self.freq_conv(mag) + mag_down
+        else:
+            mag_features = self.freq_conv(mag)
+            
+        if not self.is_last_layer:
+            # --- TRƯỜNG HỢP TẦNG GIỮA ---
+            # Downsample đặc trưng tần số
+            mag_down = self.downsample(mag_features)
+
+            # Tạo trọng số điều biến (Channel Attention dựa trên tần số)
+            weights = self.gate(mag_features).view(B, C, 1, 1)
+            
+            # Nhân để điều biến Spatial Features (tránh loạn thông tin)
+            return x *(1 + weights), mag_down
+        
+        else:
+            # --- TRƯỜNG HỢP TẦNG CUỐI ---
+            # Nén toàn bộ thông tin hình học tần số thành 1 vector
+            embedding = self.global_pool(mag_features)
+            return self.flatten(embedding)
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -89,165 +134,11 @@ class Bottleneck(nn.Module):
             return out, preact
         else:
             return out
-        
 
-class DWConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(DWConv, self).__init__()
-        
-        # 1. Depthwise Convolution: dùng groups=in_channels
-        self.depthwise = nn.Conv2d(
-            in_channels, in_channels, kernel_size=kernel_size, 
-            stride=stride, padding=padding, groups=in_channels, bias=False
-        )
-        self.bn1 = LayerNorm2d(in_channels)
-        
-        # 2. Pointwise Convolution: dùng kernel 1x1
-        self.pointwise = nn.Conv2d(
-            in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False
-        )
-        self.bn2 = LayerNorm2d(out_channels)
-        
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        # Bước 1: Trích xuất không gian (Spatial features)
-        x = self.depthwise(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        
-        # Bước 2: Kết hợp kênh (Channel features)
-        x = self.pointwise(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        
-        return x
-
-class LowBranch(nn.Module):
-    def __init__(self, planes):
-        super(LowBranch, self).__init__()
-        self.conv1 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.ln1 = LayerNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.ln2 = LayerNorm2d(planes)
-
-    def forward(self, x):
-        out = F.relu(self.ln1(self.conv1(x)))
-        out = self.ln2(self.conv2(out))
-        out += x
-        return out
-    
-class HighBranch(nn.Module):
-    def __init__(self, planes):
-        super(HighBranch, self).__init__()
-        self.conv1 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.ln1 = LayerNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.ln2 = LayerNorm2d(planes)
-
-    def forward(self, x):
-        out = F.relu(self.ln1(self.conv1(x)))
-        out = self.ln2(self.conv2(out))
-        out += x
-        return out
-    
-class Block(nn.Module):
-    
-    def __init__(self, planes, is_first=False, is_last=False):
-        super(Block, self).__init__()
-        self.is_first = is_first
-        self.is_last = is_last
-        self.low_branch = LowBranch(planes)
-        if not is_first:
-            self.high_branch = HighBranch(planes)
-        
-        if is_last:
-            self.conv1 = nn.Conv2d(planes*2, planes*2, kernel_size=3, stride=1, padding=1, bias=False)
-            self.ln1 = LayerNorm2d(planes*2)
-            self.conv2 = nn.Conv2d(planes*2, planes*2, kernel_size=3, stride=1, padding=1, bias=False)
-            self.ln2 = LayerNorm2d(planes*2)
-
-
-        
-    def forward(self, x, x_high=None):
-        out = self.low_branch(x)
-        if not self.is_first:
-            out_high = self.high_branch(x_high)
-            if self.is_last:
-                out = F.relu(self.ln1(self.conv1(torch.concat([out, out_high], dim=1))))
-                out = self.ln2(self.conv2(out))
-                return out
-            return out, out_high
-        return out
-    
-class DWTDown(nn.Module):
-    def __init__(self, planes):
-        super(DWTDown, self).__init__()
-        self.xfm = DWTForward(J=1, mode='zero', wave='haar')
-        self.fusion_high = DWConv(planes*3, planes)
-    
-    def forward(self, x):
-        x_low, x_high = self.xfm(x)
-        x_high = x_high[0]
-        b, c, n, h, w = x_high.shape
-        x_high = x_high.view(b, c*n, h, w)
-        x_high = self.fusion_high(x_high)
-        return x_low, x_high
-    
-    
-class SFNet(nn.Module):
-    def __init__(self, block, num_blocks, in_channel=3):
-        super(SFNet, self).__init__()
-        
-        self.in_planes = 64
-        self.conv1 = nn.Conv2d(in_channel, 64, kernel_size=3, stride=1, padding=1,
-                               bias=False)
-        self.ln1 = LayerNorm2d(64)
-        self.layer1 = self._make_layer(block, 64, num_blocks[0], is_first=True)
-        self.layer2 = self._make_layer(block, 64, num_blocks[1])
-        self.layer3 = self._make_layer(block, 128, num_blocks[2])
-        self.layer4 = self._make_layer(block, 256, num_blocks[3])
-        self.down1 = DWTDown(64)
-        self.down2 = DWTDown(128)
-        self.down3 = DWTDown(256)
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-            
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-
-    def _make_layer(self, block, planes, num_blocks, is_first=False):
-        layers = []
-        for i in range(num_blocks):
-            is_last = True if (not is_first and i == num_blocks - 1) else False
-            layers.append(block(planes, is_first=is_first, is_last=is_last))
-        return nn.ModuleList(layers)
-    
-    def run_layer(self, layer, x, x_high=None):
-        for idx, block in enumerate(layer):
-            if x_high is None:
-                x = block(x)
-            else:
-                if idx != len(layer) - 1:
-                    x, x_high = block(x, x_high)
-                else:
-                    x = block(x, x_high)
-        return x
-    
-    def forward(self, x):
-        out = F.relu(self.ln1(self.conv1(x)))
-        out = self.run_layer(self.layer1, out)
-        out, out_high = self.down1(out)
-        out = self.run_layer(self.layer2, out, out_high)
-        out, out_high = self.down2(out)
-        out = self.run_layer(self.layer3, out, out_high)
-        out, out_high = self.down3(out)
-        out = self.run_layer(self.layer4, out, out_high)
-        out = self.avgpool(out)
-        out = torch.flatten(out, 1)
-        return out
 
 class ResNet(nn.Module):
+    
+    
     def __init__(self, block, num_blocks, in_channel=3, zero_init_residual=False):
         super(ResNet, self).__init__()
         self.in_planes = 64
@@ -256,9 +147,13 @@ class ResNet(nn.Module):
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
+        self.fft_layer1 = FrequencyFeatureExtractor(64)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
+        self.fft_layer2 = FrequencyFeatureExtractor(128)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
+        self.fft_layer3 = FrequencyFeatureExtractor(256)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.fft_layer4 = FrequencyFeatureExtractor(512, is_last_layer=True)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         for m in self.modules():
@@ -291,12 +186,19 @@ class ResNet(nn.Module):
     def forward(self, x, layer=100):
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.layer1(out)
+        # print(out.shape)
+        out, mag_down = self.fft_layer1(out)
         out = self.layer2(out)
+        out, mag_down = self.fft_layer2(out, mag_down)
         out = self.layer3(out)
+        out, mag_down = self.fft_layer3(out, mag_down)
         out = self.layer4(out)
+        mag_down = self.fft_layer4(out, mag_down)
         out = self.avgpool(out)
         out = torch.flatten(out, 1)
-        return out
+        print(mag_down.shape, out.shape)
+        vec = torch.cat([out, mag_down], dim=1)
+        return vec
 
 
 def resnet18(**kwargs):
@@ -314,14 +216,10 @@ def resnet50(**kwargs):
 def resnet101(**kwargs):
     return ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
 
-def sfnet(**kwargs):
-    return SFNet(Block, [2, 2, 2, 2], **kwargs)
-
 
 model_dict = {
-    'sfnet': [sfnet, 512],
-    'resnet18': [resnet18, 512],
-    'resnet34': [resnet34, 512],
+    'resnet18': [resnet18, 1024],
+    'resnet34': [resnet34, 1024],
     'resnet50': [resnet50, 2048],
     'resnet101': [resnet101, 2048],
 }
@@ -343,7 +241,7 @@ class LinearBatchNorm(nn.Module):
 
 class SupConResNet(nn.Module):
     """backbone + projection head"""
-    def __init__(self, name='sfnet', head='mlp', feat_dim=128):
+    def __init__(self, name='resnet50', head='mlp', feat_dim=128):
         super(SupConResNet, self).__init__()
         model_fun, dim_in = model_dict[name]
         self.encoder = model_fun()
