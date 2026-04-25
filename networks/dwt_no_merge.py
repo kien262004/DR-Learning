@@ -160,12 +160,6 @@ class Block(nn.Module):
         self.low_branch = LowBranch(planes)
         if not is_first:
             self.high_branch = HighBranch(planes)
-        
-        if is_last:
-            self.conv1 = nn.Conv2d(planes*2, planes*2, kernel_size=3, stride=1, padding=1, bias=False)
-            self.ln1 = LayerNorm2d(planes*2)
-            self.conv2 = nn.Conv2d(planes*2, planes*2, kernel_size=3, stride=1, padding=1, bias=False)
-            self.ln2 = LayerNorm2d(planes*2)
 
 
         
@@ -174,9 +168,7 @@ class Block(nn.Module):
         if not self.is_first:
             out_high = self.high_branch(x_high)
             if self.is_last:
-                out = F.relu(self.ln1(self.conv1(torch.concat([out, out_high], dim=1))))
-                out = self.ln2(self.conv2(out))
-                return out
+                return torch.concat([out, out_high], dim=1)
             return out, out_high
         return out
     
