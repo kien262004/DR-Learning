@@ -160,6 +160,12 @@ class Block(nn.Module):
         self.low_branch = LowBranch(planes)
         if not is_first:
             self.high_branch = HighBranch(planes)
+        
+        if is_last:
+            self.conv1 = nn.Conv2d(planes*2, planes*2, kernel_size=1, stride=1, bias=False)
+            self.ln1 = LayerNorm2d(planes*2)
+            self.conv2 = nn.Conv2d(planes*2, planes*2, kernel_size=1, stride=1, bias=False)
+            self.ln2 = LayerNorm2d(planes*2)
 
 
         
@@ -168,7 +174,9 @@ class Block(nn.Module):
         if not self.is_first:
             out_high = self.high_branch(x_high)
             if self.is_last:
-                return torch.concat([out, out_high], dim=1)
+                out = F.relu(self.ln1(self.conv1(torch.concat([out, out_high], dim=1))))
+                out = self.ln2(self.conv2(out))
+                return out
             return out, out_high
         return out
     
@@ -176,14 +184,25 @@ class DWTDown(nn.Module):
     def __init__(self, planes):
         super(DWTDown, self).__init__()
         self.xfm = DWTForward(J=1, mode='zero', wave='haar')
-        self.fusion_high = DWConv(planes*3, planes)
-    
+        # Thay vì nén ngay, dùng Attention để học trọng số cho LH, HL, HH
+        self.attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(planes * 3, planes * 3, 1),
+            nn.Sigmoid()
+        )
+        self.fusion = DWConv(planes * 3, planes)
+
     def forward(self, x):
         x_low, x_high = self.xfm(x)
-        x_high = x_high[0]
+        x_high = x_high[0] # (B, C, 3, H, W)
         b, c, n, h, w = x_high.shape
-        x_high = x_high.view(b, c*n, h, w)
-        x_high = self.fusion_high(x_high)
+        x_high = x_high.view(b, c * n, h, w)
+        
+        # Apply Channel Attention
+        at = self.attention(x_high)
+        x_high = x_high * at
+        
+        x_high = self.fusion(x_high)
         return x_low, x_high
     
     

@@ -4,4 +4,5 @@ CUDA_VISIBLE_DEVICES=0 python main_supcon.py --batch_size 2 --learning_rate 0.00
 --mean "(0.4914, 0.4822, 0.4465)" \
 --std "(0.2675, 0.2565, 0.2761)" \
 --method SupCon \
+--model 'Resnet18' \
 --print_freq 1 --save_freq 5
